@@ -1,115 +1,119 @@
 /**
- * Estación Meteorológica Inteligente — Código Definitivo Integrado
- * Proyecto final para el trayecto NovaMakers Avanzado (9 a 12 años)
- * 
- * Descripción: Integra lectura de temperatura y humedad (DHT11),
- * calidad del aire (MQ-135), visualización en LCD I2C con iconos personalizados
- * y rotación de pantallas, control de semáforo ambiental (LEDs) y alertas
- * acústicas (buzzer pasivo), y envío de datos formateados como CSV por
- * el puerto serie para análisis científico en planillas de cálculo.
+ * Estación Meteorológica Inteligente — Código Definitivo Integrado (ESP32 - Faniot Kitmaker 2.0)
+ * Proyecto final para el trayecto NovaMakers Avanzado
+ *
+ * Descripción: Integra lectura de temperatura y humedad (HTU21D),
+ * luz ambiente (TEMT6000), y humedad de suelo (Analógico).
+ * Visualización en OLED I2C 128x64. Control de semáforo ambiental con Neopíxeles
+ * y alertas acústicas (buzzer pasivo). Envío de datos como CSV.
  */
 
 #include <Arduino.h>
-#include <LiquidCrystal.h>
-#include <DHT.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_HTU21DF.h>
+#include <Adafruit_NeoPixel.h>
 
 // ==========================================
-// ⚙️ CONFIGURACIÓN DE PINES
+// ⚙️ CONFIGURACIÓN DE PINES Y HARDWARE
 // ==========================================
-#define DHTPIN 2
-#define DHTTYPE DHT11
-#define MQ_PIN A0
+#define LUZ_PIN 39           // TEMT6000 en Kitmaker 2.0
+#define SUELO_PIN 34         // Pin de expansión sugerido para sensor de humedad de suelo
+#define BUZZER_PIN 12        // Buzzer en Kitmaker 2.0
+#define NEOPIXEL_PIN 27      // Neopíxeles en Kitmaker 2.0
+#define NUMPIXELS 4
 
-#define LED_VERDE 8
-#define LED_AMARILLO 9
-#define LED_ROJO 10
-#define BUZZER_PIN 3
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
 
 // ==========================================
 // 📊 CONSTANTES Y UMBRALES CONFIGURABLES
 // ==========================================
-const float TEMP_LIMITE_ALTA = 35.0;      // Umbral advertencia calor (Celsius)
-const float TEMP_LIMITE_CRITICA = 40.0;    // Umbral peligro calor extremo (Celsius)
-const float HUM_LIMITE_ALTA = 80.0;       // Umbral advertencia humedad (%)
-const int AIRE_LIMITE_CRITICO = 350;       // Umbral peligro gases (MQ-135 crudo)
+const float TEMP_LIMITE_ALTA = 35.0;
+const float TEMP_LIMITE_CRITICA = 40.0;
+const int SUELO_LIMITE_BAJO = 40;         // % de humedad de suelo (Advertencia)
+const int SUELO_LIMITE_CRITICO = 20;      // % de humedad de suelo (Peligro, muy seco)
 
-const unsigned long TIEMPO_ROTACION = 3000; // Tiempo alternar pantalla LCD (ms)
+// Valores de calibración para la humedad de suelo (12 bits ADC: 0-4095)
+// Ajustar estos valores según las lecturas reales del sensor en seco y sumergido
+const int VALOR_SECO = 4095;
+const int VALOR_HUMEDO = 1000;
+
 const unsigned long INTERVALO_CSV = 5000;   // Intervalo de registro serial CSV (ms)
 
 // ==========================================
 // 🔌 OBJETOS Y VARIABLES GLOBALES
 // ==========================================
-DHT dht(DHTPIN, DHTTYPE);
-LiquidCrystal lcd(12, 11, 4, 5, 6, 7);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Adafruit_HTU21DF htu = Adafruit_HTU21DF();
+Adafruit_NeoPixel pixels(NUMPIXELS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
 // Variables físicas
 float temperatura = 0.0;
-float humedad = 0.0;
-float sensacion = 0.0;
-int gasCrudo = 0;
+float humedadAmbiente = 0.0;
+int luzCruda = 0;
+int porcentajeLuz = 0;
+int sueloCrudo = 0;
+int porcentajeSuelo = 0;
 
 // Tiempos de software
-unsigned long tiempoUltimoCambio = 0;
 unsigned long tiempoUltimoRegistro = 0;
 unsigned long segundosTranscurridos = 0;
-bool mostrarPantallaSecundaria = false; 
-
-// ==========================================
-// 🎨 CARACTERES CUSTOM (ICONOS)
-// ==========================================
-byte iconoTermometro[8] = { B00100, B01010, B01010, B01010, B01110, B11111, B11111, B01110 };
-byte iconoGota[8]       = { B00100, B00100, B01010, B01010, B10001, B10001, B10001, B01110 };
-byte iconoGrado[8]      = { B00110, B01001, B01001, B00110, B00000, B00000, B00000, B00000 };
-byte iconoRostroFeliz[8] = { B00000, B01010, B00000, B00000, B10001, B01110, B00000, B00000 };
 
 // Declaración de funciones modulares
 void leerSensores();
 void controlarAlertas();
-void actualizarLcd();
+void actualizarOLED();
 void registrarCsv();
 void emitirPito(int duracion, int frecuencia);
 void apagarSemaforo();
+void encenderSemaforo(uint32_t color);
 
 // ==========================================
 // ▶️ SETUP (CONFIGURACIÓN INICIAL)
 // ==========================================
 void setup() {
-  // Inicializamos comunicación serie para registro CSV
-  Serial.begin(9600);
-  
-  dht.begin();
-  
-  lcd.begin(16, 2);
-  
-  // Guardamos caracteres custom en el LCD
-  lcd.createChar(0, iconoTermometro);
-  lcd.createChar(1, iconoGota);
-  lcd.createChar(2, iconoGrado);
-  lcd.createChar(3, iconoRostroFeliz);
-  
-  // Configuración de pines de actuadores
-  pinMode(LED_VERDE, OUTPUT);
-  pinMode(LED_AMARILLO, OUTPUT);
-  pinMode(LED_ROJO, OUTPUT);
+  Serial.begin(115200);
+
+  // Inicializar I2C para HTU21D y OLED
+  Wire.begin();
+
+  if (!htu.begin()) {
+    Serial.println("No se encontró el sensor HTU21D!");
+  }
+
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("Fallo al iniciar pantalla OLED");
+  }
+
+  pixels.begin();
+  pixels.setBrightness(50); // Brillo de los LEDs (0-255)
+  pixels.show(); // Apagar todos inicialmente
+
   pinMode(BUZZER_PIN, OUTPUT);
-  
+  pinMode(LUZ_PIN, INPUT);
+  pinMode(SUELO_PIN, INPUT);
+
   // Test inicial de luces
-  digitalWrite(LED_VERDE, HIGH);
-  digitalWrite(LED_AMARILLO, HIGH);
-  digitalWrite(LED_ROJO, HIGH);
+  encenderSemaforo(pixels.Color(255, 255, 255)); // Blanco
   delay(500);
   apagarSemaforo();
-  
+
   // Cabecera del archivo CSV por puerto Serial
-  Serial.println(F("Tiempo(s),Temperatura(C),Humedad(%),CalidadAire(Crudo)"));
-  
-  // Mensaje de bienvenida en el LCD
-  lcd.setCursor(0, 0);
-  lcd.print("Estacion Meteo");
-  lcd.setCursor(0, 1);
-  lcd.print("NovaMaker Final");
-  delay(1500);
-  lcd.clear();
+  Serial.println(F("Tiempo(s),Temperatura(C),HumAmbiente(%),Luz(%),HumSuelo(%)"));
+
+  // Mensaje de bienvenida en el OLED
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 20);
+  display.println(F(" Estacion Meteo"));
+  display.setCursor(0, 35);
+  display.println(F(" RED MAKER"));
+  display.display();
+  delay(2000);
 }
 
 // ==========================================
@@ -118,18 +122,9 @@ void setup() {
 void loop() {
   leerSensores();
   controlarAlertas();
-  
-  // Alternancia de pantallas en el LCD sin detener el loop
-  if (millis() - tiempoUltimoCambio >= TIEMPO_ROTACION) {
-    mostrarPantallaSecundaria = !mostrarPantallaSecundaria;
-    tiempoUltimoCambio = millis();
-    lcd.clear();
-  }
-  actualizarLcd();
-  
-  // Registro de datos por puerto Serie
+  actualizarOLED();
   registrarCsv();
-  
+
   delay(200); // Frecuencia de ciclo de la CPU
 }
 
@@ -138,106 +133,97 @@ void loop() {
 // ==========================================
 
 void leerSensores() {
-  temperatura = dht.readTemperature();
-  humedad = dht.readHumidity();
-  sensacion = dht.computeHeatIndex(temperatura, humedad, false);
-  gasCrudo = analogRead(MQ_PIN);
+  temperatura = htu.readTemperature();
+  humedadAmbiente = htu.readHumidity();
+
+  luzCruda = analogRead(LUZ_PIN);
+  porcentajeLuz = map(luzCruda, 0, 4095, 0, 100);
+  porcentajeLuz = constrain(porcentajeLuz, 0, 100);
+
+  sueloCrudo = analogRead(SUELO_PIN);
+  // Mapear la lectura invertida típica de sensores resistivos/capacitivos
+  porcentajeSuelo = map(sueloCrudo, VALOR_SECO, VALOR_HUMEDO, 0, 100);
+  porcentajeSuelo = constrain(porcentajeSuelo, 0, 100);
 }
 
 void controlarAlertas() {
-  // Caso de error en sensores
-  if (isnan(temperatura) || isnan(humedad)) {
-    apagarSemaforo();
-    digitalWrite(LED_AMARILLO, HIGH);
-    return;
+  // 1. Peligro (Rojo): Temperatura extrema o suelo muy seco
+  if (temperatura >= TEMP_LIMITE_CRITICA || porcentajeSuelo <= SUELO_LIMITE_CRITICO) {
+    encenderSemaforo(pixels.Color(255, 0, 0)); // Rojo
+    emitirPito(100, 2500);
   }
-  
-  // 1. Peligro (Rojo)
-  if (temperatura >= TEMP_LIMITE_CRITICA || gasCrudo >= AIRE_LIMITE_CRITICO) {
-    apagarSemaforo();
-    digitalWrite(LED_ROJO, HIGH);
-    emitirPito(100, 2500); // Pitidos cortos y agudos (agresivo)
-  }
-  // 2. Advertencia (Amarillo)
-  else if (temperatura >= TEMP_LIMITE_ALTA || humedad >= HUM_LIMITE_ALTA) {
-    apagarSemaforo();
-    digitalWrite(LED_AMARILLO, HIGH);
-    emitirPito(300, 1000); // Pitido más largo y grave (moderado)
+  // 2. Advertencia (Amarillo): Temperatura alta o suelo secándose
+  else if (temperatura >= TEMP_LIMITE_ALTA || porcentajeSuelo <= SUELO_LIMITE_BAJO) {
+    encenderSemaforo(pixels.Color(255, 150, 0)); // Amarillo/Naranja
+    emitirPito(300, 1000);
   }
   // 3. Normal (Verde)
   else {
-    apagarSemaforo();
-    digitalWrite(LED_VERDE, HIGH);
+    encenderSemaforo(pixels.Color(0, 255, 0)); // Verde
   }
 }
 
-void actualizarLcd() {
-  // Caso de error
-  if (isnan(temperatura) || isnan(humedad)) {
-    lcd.setCursor(0, 0);
-    lcd.print("Error Lectura!");
-    lcd.setCursor(0, 1);
-    lcd.print("Chequear Cables");
-    return;
+void actualizarOLED() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  // Título
+  display.setCursor(0, 0);
+  display.print(F("--- DATOS ACTUALES ---"));
+
+  // Temperatura
+  display.setCursor(0, 15);
+  display.print(F("Temp: "));
+  if (isnan(temperatura) || temperatura > 120.0) display.print(F("Error"));
+  else {
+    display.print(temperatura, 1);
+    display.print(F(" C"));
   }
-  
-  if (!mostrarPantallaSecundaria) {
-    // Pantalla 1: Temperatura y Humedad
-    lcd.setCursor(0, 0);
-    lcd.write((uint8_t)0); // Icono termómetro
-    lcd.print(" Temp: ");
-    lcd.print(temperatura, 1);
-    lcd.write((uint8_t)2); // Simbolo de grado
-    lcd.print("C");
-    
-    lcd.setCursor(0, 1);
-    lcd.write((uint8_t)1); // Icono gota
-    lcd.print(" Hum:  ");
-    lcd.print(humedad, 1);
-    lcd.print(" %");
-  } else {
-    // Pantalla 2: Calidad Aire y Sensación Térmica
-    lcd.setCursor(0, 0);
-    lcd.print("Aire: ");
-    lcd.print(gasCrudo);
-    
-    if (gasCrudo < 250) {
-      lcd.print(" OK ");
-      lcd.write((uint8_t)3); // Carita feliz
-    } else if (gasCrudo >= 250 && gasCrudo < AIRE_LIMITE_CRITICO) {
-      lcd.print(" REG");
-    } else {
-      lcd.print(" MAL!");
-    }
-    
-    lcd.setCursor(0, 1);
-    lcd.print("Sens.T: ");
-    lcd.print(sensacion, 1);
-    lcd.write((uint8_t)2);
-    lcd.print("C");
+
+  // Humedad Ambiente
+  display.setCursor(0, 27);
+  display.print(F("Hum Amb: "));
+  if (isnan(humedadAmbiente) || humedadAmbiente > 100.0) display.print(F("Error"));
+  else {
+    display.print(humedadAmbiente, 1);
+    display.print(F(" %"));
   }
+
+  // Humedad del Suelo
+  display.setCursor(0, 39);
+  display.print(F("Hum Suelo: "));
+  display.print(porcentajeSuelo);
+  display.print(F(" %"));
+
+  // Luz
+  display.setCursor(0, 51);
+  display.print(F("Luz: "));
+  display.print(porcentajeLuz);
+  display.print(F(" %"));
+
+  display.display();
 }
 
 void registrarCsv() {
   if (millis() - tiempoUltimoRegistro >= INTERVALO_CSV) {
     tiempoUltimoRegistro = millis();
     segundosTranscurridos = tiempoUltimoRegistro / 1000;
-    
-    if (!isnan(temperatura) && !isnan(humedad)) {
-      Serial.print(segundosTranscurridos);
-      Serial.print(F(","));
-      Serial.print(temperatura, 1);
-      Serial.print(F(","));
-      Serial.print(humedad, 1);
-      Serial.print(F(","));
-      Serial.println(gasCrudo);
-    }
+
+    Serial.print(segundosTranscurridos);
+    Serial.print(F(","));
+    Serial.print(temperatura, 1);
+    Serial.print(F(","));
+    Serial.print(humedadAmbiente, 1);
+    Serial.print(F(","));
+    Serial.print(porcentajeLuz);
+    Serial.print(F(","));
+    Serial.println(porcentajeSuelo);
   }
 }
 
 void emitirPito(int duracion, int frecuencia) {
   static unsigned long ultimoSonido = 0;
-  // Controlamos no pisar el buzzer constantemente con delay()
   if (millis() - ultimoSonido >= (duracion + 500)) {
     tone(BUZZER_PIN, frecuencia, duracion);
     ultimoSonido = millis();
@@ -245,7 +231,15 @@ void emitirPito(int duracion, int frecuencia) {
 }
 
 void apagarSemaforo() {
-  digitalWrite(LED_VERDE, LOW);
-  digitalWrite(LED_AMARILLO, LOW);
-  digitalWrite(LED_ROJO, LOW);
+  for(int i=0; i<NUMPIXELS; i++) {
+    pixels.setPixelColor(i, pixels.Color(0, 0, 0));
+  }
+  pixels.show();
+}
+
+void encenderSemaforo(uint32_t color) {
+  for(int i=0; i<NUMPIXELS; i++) {
+    pixels.setPixelColor(i, color);
+  }
+  pixels.show();
 }

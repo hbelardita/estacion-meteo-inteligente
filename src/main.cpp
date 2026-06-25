@@ -4,7 +4,7 @@
  * 
  * Descripción: Integra lectura de temperatura y humedad (DHT11),
  * calidad del aire (MQ-135), visualización en LCD I2C con iconos personalizados
- * y rotación de pantallas, control de semáforo ambiental (LEDs) y alertas
+ * y rotación de pantallas, control de semáforo ambiental (LED RGB) y alertas
  * acústicas (buzzer pasivo), y envío de datos formateados como CSV por
  * el puerto serie para análisis científico en planillas de cálculo.
  */
@@ -20,9 +20,9 @@
 #define DHTTYPE DHT11
 #define MQ_PIN A0
 
-#define LED_VERDE 8
-#define LED_AMARILLO 9
-#define LED_ROJO 10
+#define PIN_ROJO 8
+#define PIN_VERDE 9
+#define PIN_AZUL 10
 #define BUZZER_PIN 3
 
 // ==========================================
@@ -68,6 +68,7 @@ void controlarAlertas();
 void actualizarLcd();
 void registrarCsv();
 void emitirPito(int duracion, int frecuencia);
+void encenderColor(bool r, bool g, bool b);
 void apagarSemaforo();
 
 // ==========================================
@@ -88,16 +89,18 @@ void setup() {
   lcd.createChar(3, iconoRostroFeliz);
   
   // Configuración de pines de actuadores
-  pinMode(LED_VERDE, OUTPUT);
-  pinMode(LED_AMARILLO, OUTPUT);
-  pinMode(LED_ROJO, OUTPUT);
+  pinMode(PIN_ROJO, OUTPUT);
+  pinMode(PIN_VERDE, OUTPUT);
+  pinMode(PIN_AZUL, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
   
-  // Test inicial de luces
-  digitalWrite(LED_VERDE, HIGH);
-  digitalWrite(LED_AMARILLO, HIGH);
-  digitalWrite(LED_ROJO, HIGH);
-  delay(500);
+  // Test inicial de luces (RGB)
+  encenderColor(true, false, false); // Rojo
+  delay(300);
+  encenderColor(false, true, false); // Verde
+  delay(300);
+  encenderColor(false, false, true); // Azul
+  delay(300);
   apagarSemaforo();
   
   // Cabecera del archivo CSV por puerto Serial
@@ -147,27 +150,23 @@ void leerSensores() {
 void controlarAlertas() {
   // Caso de error en sensores
   if (isnan(temperatura) || isnan(humedad)) {
-    apagarSemaforo();
-    digitalWrite(LED_AMARILLO, HIGH);
+    encenderColor(false, false, true); // Azul para indicar error de conexión
     return;
   }
   
   // 1. Peligro (Rojo)
   if (temperatura >= TEMP_LIMITE_CRITICA || gasCrudo >= AIRE_LIMITE_CRITICO) {
-    apagarSemaforo();
-    digitalWrite(LED_ROJO, HIGH);
+    encenderColor(true, false, false); // Rojo puro
     emitirPito(100, 2500); // Pitidos cortos y agudos (agresivo)
   }
   // 2. Advertencia (Amarillo)
   else if (temperatura >= TEMP_LIMITE_ALTA || humedad >= HUM_LIMITE_ALTA) {
-    apagarSemaforo();
-    digitalWrite(LED_AMARILLO, HIGH);
+    encenderColor(true, true, false); // Rojo + Verde = Amarillo
     emitirPito(300, 1000); // Pitido más largo y grave (moderado)
   }
   // 3. Normal (Verde)
   else {
-    apagarSemaforo();
-    digitalWrite(LED_VERDE, HIGH);
+    encenderColor(false, true, false); // Verde puro
   }
 }
 
@@ -238,14 +237,24 @@ void registrarCsv() {
 void emitirPito(int duracion, int frecuencia) {
   static unsigned long ultimoSonido = 0;
   // Controlamos no pisar el buzzer constantemente con delay()
-  if (millis() - ultimoSonido >= (duracion + 500)) {
+  if (millis() - ultimoSonido >= (unsigned long)(duracion + 500)) {
     tone(BUZZER_PIN, frecuencia, duracion);
     ultimoSonido = millis();
   }
 }
 
+/**
+ * Función auxiliar para encender o apagar los componentes del LED RGB.
+ * Al ser un LED de Cátodo Común:
+ * - HIGH enciende el canal.
+ * - LOW apaga el canal.
+ */
+void encenderColor(bool r, bool g, bool b) {
+  digitalWrite(PIN_ROJO, r ? HIGH : LOW);
+  digitalWrite(PIN_VERDE, g ? HIGH : LOW);
+  digitalWrite(PIN_AZUL, b ? HIGH : LOW);
+}
+
 void apagarSemaforo() {
-  digitalWrite(LED_VERDE, LOW);
-  digitalWrite(LED_AMARILLO, LOW);
-  digitalWrite(LED_ROJO, LOW);
+  encenderColor(false, false, false);
 }
